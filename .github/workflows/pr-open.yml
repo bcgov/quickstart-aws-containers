@@ -6,8 +6,14 @@ on:
 concurrency:
   # Cancel in progress for PR open and close
   group: ${{ github.event.number }}
-  cancel-in-progress: true
-
+  cancel-in-progress: false
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: write # This is required for actions/checkout
+  packages: write
+  pull-requests: write
+env:
+    AWS_REGION: ca-central-1
 jobs:
   # https://github.com/bcgov-nr/action-builder-ghcr
   builds:
@@ -15,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        package: [backend, frontend, migrations]
+        package: [backend, migrations]
     timeout-minutes: 10
     steps:
       - uses: bcgov-nr/action-builder-ghcr@v2.3.0
@@ -25,34 +31,71 @@ jobs:
           tag: ${{ github.event.number }}
           tag_fallback: latest
           triggers: ('${{ matrix.package }}/')
-
+      - uses: shrink/actions-docker-registry-tag@v4
+        with:
+          registry: ghcr.io
+          repository: ${{ github.repository }}/${{ matrix.package }}
+          target: ${{ github.event.number }}
+          tags: ${{ github.event.number }}-${{ github.run_number }}
   # https://github.com/bcgov/quickstart-openshift-helpers
-  deploys:
-    name: Deploys
+  deploy-db:
     needs: [builds]
+    name: Deploys Database
     uses: ./.github/workflows/.deployer.yml
-    secrets:
-      oc_namespace: ${{ secrets.OC_NAMESPACE }}
-      oc_token: ${{ secrets.OC_TOKEN }}
     with:
-      triggers: ('backend/' 'frontend/' 'migrations/' 'charts/')
-      db_user: app-${{github.event.number}}
-      params: --set global.secrets.persist=false
-
-  tests:
-    name: Tests
-    if: needs.deploys.outputs.triggered == 'true'
-    needs: [deploys]
-    uses: ./.github/workflows/.tests.yml
+      environment_name: dev
+      command: apply
+      working_directory: database
+    secrets: inherit
+  deploy-api:
+    name: Deploys API
+    needs: [deploy-db]
+    uses: ./.github/workflows/.deployer.yml
     with:
-      target: ${{ github.event.number }}
-
-  results:
-    name: PR Results
-    needs: [builds, deploys, tests]
-    if: always()
+      environment_name: dev
+      command: apply
+      working_directory: api
+      tag: ${{ github.event.number }}-${{ github.run_number }}
+      app_env: ${{github.event.number}}
+    secrets: inherit
+  deploy-cloudfront:
+    name: Deploys Cloudfront
+    needs: [deploy-db]
+    uses: ./.github/workflows/.deployer.yml
+    with:
+      environment_name: dev
+      command: apply
+      working_directory: frontend
+      tag: ${{ github.event.number }}-${{ github.run_number }}
+      app_env: ${{github.event.number}}
+    secrets: inherit
+  build-ui:
+    name: Builds UI
+    needs: [deploy-api, deploy-cloudfront]
     runs-on: ubuntu-24.04
     steps:
-      - if: contains(needs.*.result, 'failure')||contains(needs.*.result, 'canceled')
-        run: echo "At least one job has failed." && exit 1
-      - run: echo "Success!"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+            role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+            aws-region: ${{ env.AWS_REGION }}
+      - name: Build And Update UI (CF)
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ needs.deploy-api.outputs.API_GW_URL }}/api
+          S3_BUCKET_ARN: ${{ needs.deploy-cloudfront.outputs.S3_BUCKET_ARN }}
+          CF_DISTRIBUTION_ID: ${{ needs.deploy-cloudfront.outputs.CF_DISTRIBUTION_ID }}
+        run: |
+          npm run deploy
+          aws s3 sync --delete ./dist s3://$(echo "$S3_BUCKET_ARN" | cut -d: -f6)
+          aws cloudfront create-invalidation --distribution-id $CF_DISTRIBUTION_ID --paths "/*"
+

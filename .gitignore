@@ -365,3 +365,7 @@ pyrightconfig.json
 *.key
 *.pem
 *.pub
+**/node_modules
+**/dist
+# nested terragrunt-cache
+**/.terragrunt-cache/**
