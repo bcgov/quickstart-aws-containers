@@ -16,7 +16,6 @@ class PrismaService extends PrismaClient<Prisma.PrismaClientOptions, 'query'> im
 
   constructor() {
     if (PrismaService.instance) {
-      console.log('Returning existing PrismaService instance');
       return PrismaService.instance;
     }
     super({
