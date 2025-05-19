@@ -27,7 +27,7 @@ jobs:
       - name: PR Number
         if: ${{ github.event_name != 'workflow_dispatch' }} 
         id: pr
-        uses: bcgov-nr/action-get-pr@v0.0.1
+        uses: bcgov-nr/action-get-pr@21f9351425cd55a98e869ee28919a512aa30647d # v0.0.1
   
   deploy_stack_dev:
     name: Deploy Stack Dev
